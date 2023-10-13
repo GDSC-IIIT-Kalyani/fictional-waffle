@@ -1,49 +1,46 @@
-use crossterm::{
-    event::{self, KeyCode, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
-};
 use ratatui::{
-    prelude::*,
-    widgets::*,
-    // layout::*,
+    prelude::{CrosstermBackend, Terminal},
+    widgets::Paragraph,
 };
-use std::io::{stderr, Result};
 
-fn main() -> Result<()> {
-    stderr().execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stderr()))?;
-    terminal.clear()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // start :: enable raw mode
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(std::io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
 
+    // init :: terminal backend
+    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
+
+    // define :: counter variable
+    let mut counter = 0;
+
+    // main :: application loop
     loop {
-        terminal.draw(|frame| {
-            let area = frame.size();
-            // small text centered in the middle of the screen
-            frame.render_widget(
-                Paragraph::new("Hello GDSC! (press 'q' to quit)")
-                    .black()
-                    .on_green()
-                    .bold()
-                    .alignment(Alignment::Center)
-                    .block(Block::default()
-                           .borders(Borders::ALL)
-                           .border_type(BorderType::Thick)
-                           .padding(Padding::new(0, 0, area.height / 2, 0))),
-                area,
+        // render :: ui
+        terminal.draw(|f| {
+            f.render_widget(
+                Paragraph::new(format!("Counter: {}", counter)),
+                f.size(),
             );
         })?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let event::Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                    break;
+        // handle :: input
+        if crossterm::event::poll(std::time::Duration::from_millis(250))? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                if key.kind == crossterm::event::KeyEventKind::Press {
+                    match key.code {
+                        crossterm::event::KeyCode::Char('j') => counter += 1,
+                        crossterm::event::KeyCode::Char('k') => counter -= 1,
+                        crossterm::event::KeyCode::Char('q') => break,
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
-    stderr().execute(LeaveAlternateScreen)?;
-    disable_raw_mode()?;
+    // stop :: disable raw mode
+    crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }
