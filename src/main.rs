@@ -1,46 +1,75 @@
+use crossterm::{
+    event::{self, Event::Key, KeyCode::Char},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    execute,
+};
 use ratatui::{
     prelude::{CrosstermBackend, Terminal},
     widgets::Paragraph,
 };
 
+// type Err = Box<dyn std::error::Error>;
+// type Result<T> = std::result::Result<T, Err>;
+use anyhow::Result;
+pub type Frame<'a> = ratatui::Frame<'a, CrosstermBackend<std::io::Stderr>>;
+
+struct App {
+    counter: i64,
+    should_quit: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // start :: enable raw mode
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(std::io::stderr(), crossterm::terminal::EnterAlternateScreen)?;
+    startup()?;
+    let status = run();
+    shutdown()?;
+    status?;
+    Ok(())
+}
 
-    // init :: terminal backend
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
+fn startup() -> Result<()> {
+    enable_raw_mode()?;
+    execute!(std::io::stderr(), EnterAlternateScreen)?;
+    Ok(())
+}
 
-    // define :: counter variable
-    let mut counter = 0;
+fn shutdown() -> Result<()> {
+    execute!(std::io::stderr(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    Ok(())
+}
 
-    // main :: application loop
-    loop {
-        // render :: ui
-        terminal.draw(|f| {
-            f.render_widget(
-                Paragraph::new(format!("Counter: {}", counter)),
-                f.size(),
-            );
-        })?;
+fn ui(app: &mut App, f: &mut Frame) -> Result<()> {
+    f.render_widget(Paragraph::new(format!("Counter: {}", app.counter)), f.size());
+    Ok(())
+}
 
-        // handle :: input
-        if crossterm::event::poll(std::time::Duration::from_millis(250))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.kind == crossterm::event::KeyEventKind::Press {
-                    match key.code {
-                        crossterm::event::KeyCode::Char('j') => counter += 1,
-                        crossterm::event::KeyCode::Char('k') => counter -= 1,
-                        crossterm::event::KeyCode::Char('q') => break,
-                        _ => {}
-                    }
+fn update(app: &mut App) -> Result<()> {
+    if event::poll(std::time::Duration::from_millis(250))? {
+        if let Key(key) = event::read()? {
+            // check if key.kind is a 'KeyEventKind::Press' for cross-platform compatibility
+            if key.kind == crossterm::event::KeyEventKind::Press {
+                match key.code {
+                    Char('j') => app.counter += 1,
+                    Char('k') => app.counter -= 1,
+                    Char('q') => app.should_quit = true,
+                    _ => {}
                 }
             }
         }
     }
-
-    // stop :: disable raw mode
-    crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen)?;
-    crossterm::terminal::disable_raw_mode()?;
     Ok(())
 }
+
+fn run() -> Result<()> {
+    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
+    let mut app = App { counter: 0, should_quit: false };
+
+    while !app.should_quit {
+        terminal.draw(|f| {ui(&mut app, f);})?;
+        update(&mut app)?;
+    }
+
+    Ok(())
+}
+
+
