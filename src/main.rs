@@ -1,75 +1,211 @@
+use std::{
+    io,
+    sync::{mpsc::Sender, Arc, RwLock},
+    time::Duration,
+};
+
+use bytes::Bytes;
 use crossterm::{
-    event::{self, Event::Key, KeyCode::Char},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
+    style::ResetColor,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
-    prelude::{CrosstermBackend, Terminal},
-    widgets::Paragraph,
+    backend::{Backend, CrosstermBackend},
+    layout::Alignment,
+    style::{Modifier, Style},
+    widgets::{Block, Borders, Paragraph},
+    Frame, Terminal,
 };
+use tui_term::widget::PseudoTerminal;
+use vt100::Screen;
 
-// type Err = Box<dyn std::error::Error>;
-// type Result<T> = std::result::Result<T, Err>;
-use anyhow::Result;
-pub type Frame<'a> = ratatui::Frame<'a, CrosstermBackend<std::io::Stderr>>;
-
-struct App {
-    counter: i64,
-    should_quit: bool,
+#[derive(Debug)]
+struct Size {
+    cols: u16,
+    rows: u16,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    startup()?;
-    let status = run();
-    shutdown()?;
-    status?;
-    Ok(())
-}
-
-fn startup() -> Result<()> {
+fn main() -> std::io::Result<()> {
+    let mut stdout = io::stdout();
+    execute!(stdout, ResetColor)?;
     enable_raw_mode()?;
-    execute!(std::io::stderr(), EnterAlternateScreen)?;
-    Ok(())
-}
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
-fn shutdown() -> Result<()> {
-    execute!(std::io::stderr(), LeaveAlternateScreen)?;
+    let pty_system = NativePtySystem::default();
+    let cwd = std::env::current_dir().unwrap();
+    let shell = "bash";
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.cwd(cwd);
+
+    let size = Size {
+        rows: terminal.size()?.height,
+        cols: terminal.size()?.width,
+    };
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+    .unwrap();
+    // Wait for the child to complete
+    std::thread::spawn(move || {
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let _child_exit_status = child.wait().unwrap();
+        drop(pair.slave);
+    });
+
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let parser = Arc::new(RwLock::new(vt100::Parser::new(size.rows, size.cols, 0)));
+
+    {
+        let parser = parser.clone();
+        std::thread::spawn(move || {
+            // Consume the output from the child
+            // Can't read the full buffer, since that would wait for EOF
+            let mut buf = [0u8; 8192];
+            let mut processed_buf = Vec::new();
+            loop {
+                let size = reader.read(&mut buf).unwrap();
+                if size == 0 {
+                    break;
+                }
+                if size > 0 {
+                    processed_buf.extend_from_slice(&buf[..size]);
+                    let mut parser = parser.write().unwrap();
+                    parser.process(&processed_buf);
+
+                    // Clear the processed portion of the buffer
+                    processed_buf.clear();
+                }
+            }
+        });
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel::<Bytes>();
+
+    // Drop writer on purpose
+    std::thread::spawn(move || {
+        let mut writer = pair.master.take_writer().unwrap();
+        while let Ok(bytes) = rx.recv() {
+            writer.write_all(&bytes).unwrap();
+        }
+        drop(pair.master);
+    });
+
+    run(&mut terminal, parser, tx)?;
+
+    // restore terminal
     disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+        )?;
+    terminal.show_cursor()?;
+    println!("{size:?}");
     Ok(())
 }
 
-fn ui(app: &mut App, f: &mut Frame) -> Result<()> {
-    f.render_widget(Paragraph::new(format!("Counter: {}", app.counter)), f.size());
-    Ok(())
-}
+fn run<B: Backend>(
+    terminal: &mut Terminal<B>,
+    parser: Arc<RwLock<vt100::Parser>>,
+    sender: Sender<Bytes>,
+    ) -> io::Result<()> {
+    loop {
+        terminal.draw(|f| ui(f, parser.read().unwrap().screen()))?;
 
-fn update(app: &mut App) -> Result<()> {
-    if event::poll(std::time::Duration::from_millis(250))? {
-        if let Key(key) = event::read()? {
-            // check if key.kind is a 'KeyEventKind::Press' for cross-platform compatibility
-            if key.kind == crossterm::event::KeyEventKind::Press {
-                match key.code {
-                    Char('j') => app.counter += 1,
-                    Char('k') => app.counter -= 1,
-                    Char('q') => app.should_quit = true,
-                    _ => {}
+        // Event read is blocking
+        if event::poll(Duration::from_millis(10))? {
+            // It's guaranteed that the `read()` won't block when the `poll()`
+            // function returns `true`
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') => return Ok(()),
+                            KeyCode::Char(input) => sender
+                                .send(Bytes::from(input.to_string().into_bytes()))
+                                .unwrap(),
+                            KeyCode::Backspace => {
+                                sender.send(Bytes::from(vec![8])).unwrap();
+                            }
+                            KeyCode::Enter => sender.send(Bytes::from(vec![b'\n'])).unwrap(),
+                            KeyCode::Left => sender.send(Bytes::from(vec![27, 91, 68])).unwrap(),
+                            KeyCode::Right => sender.send(Bytes::from(vec![27, 91, 67])).unwrap(),
+                            KeyCode::Up => sender.send(Bytes::from(vec![27, 91, 65])).unwrap(),
+                            KeyCode::Down => sender.send(Bytes::from(vec![27, 91, 66])).unwrap(),
+                            KeyCode::Home => sender.send(Bytes::from(vec![27, 91, 72])).unwrap(),
+                            KeyCode::End => sender.send(Bytes::from(vec![27, 91, 70])).unwrap(),
+                            KeyCode::PageUp => {
+                                sender.send(Bytes::from(vec![27, 91, 53, 126])).unwrap()
+                            }
+                            KeyCode::PageDown => {
+                                sender.send(Bytes::from(vec![27, 91, 54, 126])).unwrap()
+                            }
+                            KeyCode::Tab => sender.send(Bytes::from(vec![9])).unwrap(),
+                            KeyCode::BackTab => sender.send(Bytes::from(vec![27, 91, 90])).unwrap(),
+                            KeyCode::Delete => {
+                                sender.send(Bytes::from(vec![27, 91, 51, 126])).unwrap()
+                            }
+                            KeyCode::Insert => {
+                                sender.send(Bytes::from(vec![27, 91, 50, 126])).unwrap()
+                            }
+                            KeyCode::F(_) => todo!(),
+                            KeyCode::Null => todo!(),
+                            KeyCode::Esc => todo!(),
+                            KeyCode::CapsLock => todo!(),
+                            KeyCode::ScrollLock => todo!(),
+                            KeyCode::NumLock => todo!(),
+                            KeyCode::PrintScreen => todo!(),
+                            KeyCode::Pause => todo!(),
+                            KeyCode::Menu => todo!(),
+                            KeyCode::KeypadBegin => todo!(),
+                            KeyCode::Media(_) => todo!(),
+                            KeyCode::Modifier(_) => todo!(),
+                        }
+                    }
+                }
+                Event::FocusGained => {}
+                Event::FocusLost => {}
+                Event::Mouse(_) => {}
+                Event::Paste(_) => todo!(),
+                Event::Resize(rows, cols) => {
+                    parser.write().unwrap().set_size(rows, cols);
                 }
             }
         }
     }
-    Ok(())
 }
 
-fn run() -> Result<()> {
-    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
-    let mut app = App { counter: 0, should_quit: false };
-
-    while !app.should_quit {
-        terminal.draw(|f| {ui(&mut app, f);})?;
-        update(&mut app)?;
-    }
-
-    Ok(())
+fn ui<B: Backend>(f: &mut Frame<B>, screen: &Screen) {
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .margin(1)
+        .constraints(
+            [
+            ratatui::layout::Constraint::Percentage(100),
+            ratatui::layout::Constraint::Min(1),
+            ]
+            .as_ref(),
+            )
+        .split(f.size());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().add_modifier(Modifier::BOLD));
+    let pseudo_term = PseudoTerminal::new(screen).block(block);
+    f.render_widget(pseudo_term, chunks[0]);
+    let explanation = "Press q to exit".to_string();
+    let explanation = Paragraph::new(explanation)
+        .style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
+        .alignment(Alignment::Center);
+    f.render_widget(explanation, chunks[1]);
 }
-
-
