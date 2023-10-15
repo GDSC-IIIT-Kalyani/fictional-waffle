@@ -1,6 +1,6 @@
 use std::{
-    io,
-    sync::{mpsc::Sender, Arc, RwLock},
+    io::{self, BufWriter, Read, Write},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -19,6 +19,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
+use tokio::{
+    sync::mpsc::{channel, Sender},
+    task,
+};
 use tui_term::widget::PseudoTerminal;
 use vt100::Screen;
 
@@ -28,7 +32,8 @@ struct Size {
     rows: u16,
 }
 
-fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, ResetColor)?;
     enable_raw_mode()?;
@@ -39,7 +44,8 @@ fn main() -> std::io::Result<()> {
 
     let pty_system = NativePtySystem::default();
     let cwd = std::env::current_dir().unwrap();
-    let shell = "bash";
+    let shell = std::env::var("SHELL").unwrap();
+    // let shell = "./shell/nu";
     let mut cmd = CommandBuilder::new(shell);
     cmd.cwd(cwd);
 
@@ -55,9 +61,9 @@ fn main() -> std::io::Result<()> {
             pixel_width: 0,
             pixel_height: 0,
         })
-    .unwrap();
+        .unwrap();
     // Wait for the child to complete
-    std::thread::spawn(move || {
+    task::spawn_blocking(move || {
         let mut child = pair.slave.spawn_command(cmd).unwrap();
         let _child_exit_status = child.wait().unwrap();
         drop(pair.slave);
@@ -68,7 +74,7 @@ fn main() -> std::io::Result<()> {
 
     {
         let parser = parser.clone();
-        std::thread::spawn(move || {
+        task::spawn_blocking(move || {
             // Consume the output from the child
             // Can't read the full buffer, since that would wait for EOF
             let mut buf = [0u8; 8192];
@@ -90,18 +96,20 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    let (tx, rx) = std::sync::mpsc::channel::<Bytes>();
+    let (tx, mut rx) = channel::<Bytes>(32);
+
+    let mut writer = BufWriter::new(pair.master.take_writer().unwrap());
 
     // Drop writer on purpose
-    std::thread::spawn(move || {
-        let mut writer = pair.master.take_writer().unwrap();
-        while let Ok(bytes) = rx.recv() {
+    tokio::spawn(async move {
+        while let Some(bytes) = rx.recv().await {
             writer.write_all(&bytes).unwrap();
+            writer.flush().unwrap();
         }
         drop(pair.master);
     });
 
-    run(&mut terminal, parser, tx)?;
+    run(&mut terminal, parser, tx).await?;
 
     // restore terminal
     disable_raw_mode()?;
@@ -109,21 +117,21 @@ fn main() -> std::io::Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
-        )?;
+    )?;
     terminal.show_cursor()?;
     println!("{size:?}");
     Ok(())
 }
 
-fn run<B: Backend>(
+async fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     parser: Arc<RwLock<vt100::Parser>>,
     sender: Sender<Bytes>,
-    ) -> io::Result<()> {
+) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, parser.read().unwrap().screen()))?;
 
-        // Event read is blocking
+        // Event read is non-blocking
         if event::poll(Duration::from_millis(10))? {
             // It's guaranteed that the `read()` won't block when the `poll()`
             // function returns `true`
@@ -134,31 +142,32 @@ fn run<B: Backend>(
                             KeyCode::Char('q') => return Ok(()),
                             KeyCode::Char(input) => sender
                                 .send(Bytes::from(input.to_string().into_bytes()))
+                                .await
                                 .unwrap(),
                             KeyCode::Backspace => {
-                                sender.send(Bytes::from(vec![8])).unwrap();
+                                sender.send(Bytes::from(vec![8])).await.unwrap();
                             }
-                            KeyCode::Enter => sender.send(Bytes::from(vec![b'\n'])).unwrap(),
-                            KeyCode::Left => sender.send(Bytes::from(vec![27, 91, 68])).unwrap(),
-                            KeyCode::Right => sender.send(Bytes::from(vec![27, 91, 67])).unwrap(),
-                            KeyCode::Up => sender.send(Bytes::from(vec![27, 91, 65])).unwrap(),
-                            KeyCode::Down => sender.send(Bytes::from(vec![27, 91, 66])).unwrap(),
-                            KeyCode::Home => sender.send(Bytes::from(vec![27, 91, 72])).unwrap(),
-                            KeyCode::End => sender.send(Bytes::from(vec![27, 91, 70])).unwrap(),
-                            KeyCode::PageUp => {
-                                sender.send(Bytes::from(vec![27, 91, 53, 126])).unwrap()
+                            KeyCode::Enter => sender.send(Bytes::from(vec![b'\n'])).await.unwrap(),
+                            KeyCode::Left => {
+                                sender.send(Bytes::from(vec![27, 91, 68])).await.unwrap()
                             }
-                            KeyCode::PageDown => {
-                                sender.send(Bytes::from(vec![27, 91, 54, 126])).unwrap()
+                            KeyCode::Right => {
+                                sender.send(Bytes::from(vec![27, 91, 67])).await.unwrap()
                             }
-                            KeyCode::Tab => sender.send(Bytes::from(vec![9])).unwrap(),
-                            KeyCode::BackTab => sender.send(Bytes::from(vec![27, 91, 90])).unwrap(),
-                            KeyCode::Delete => {
-                                sender.send(Bytes::from(vec![27, 91, 51, 126])).unwrap()
+                            KeyCode::Up => {
+                                sender.send(Bytes::from(vec![27, 91, 65])).await.unwrap()
                             }
-                            KeyCode::Insert => {
-                                sender.send(Bytes::from(vec![27, 91, 50, 126])).unwrap()
+                            KeyCode::Down => {
+                                sender.send(Bytes::from(vec![27, 91, 66])).await.unwrap()
                             }
+                            KeyCode::Home => todo!(),
+                            KeyCode::End => todo!(),
+                            KeyCode::PageUp => todo!(),
+                            KeyCode::PageDown => todo!(),
+                            KeyCode::Tab => todo!(),
+                            KeyCode::BackTab => todo!(),
+                            KeyCode::Delete => todo!(),
+                            KeyCode::Insert => todo!(),
                             KeyCode::F(_) => todo!(),
                             KeyCode::Null => todo!(),
                             KeyCode::Esc => todo!(),
@@ -192,11 +201,11 @@ fn ui<B: Backend>(f: &mut Frame<B>, screen: &Screen) {
         .margin(1)
         .constraints(
             [
-            ratatui::layout::Constraint::Percentage(100),
-            ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Percentage(100),
+                ratatui::layout::Constraint::Min(1),
             ]
             .as_ref(),
-            )
+        )
         .split(f.size());
     let block = Block::default()
         .borders(Borders::ALL)
