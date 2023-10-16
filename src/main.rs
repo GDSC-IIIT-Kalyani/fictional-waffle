@@ -15,8 +15,6 @@ use rodio::source::{SineWave, Source};
 
 mod tui;
 
-// async play audio (Wellerman)
-
 fn play_audio() {
   let (_stream, stream_handle) = OutputStream::try_default().unwrap();
   let file = File::open("Wellerman_Nathan_Evans.mp3").unwrap();
@@ -38,6 +36,13 @@ async fn main() -> Result<()> {
   let sink = Sink::try_new(&stream_handle).unwrap();
   sink.append(source);
   println!("Hello, world!");
+
+  // make a new thread to run tui::main()
+  // std::thread::spawn(|| {
+  //   let _ = tui::main();
+  // }).join().expect("The inner TUI thread has panicked");
+
+
   let mut app = App::default();
   app.run().await
 }
@@ -147,7 +152,11 @@ impl App {
     let mut offset = 0;
     if self.state == AppState::Split {
         offset = 1;
-        f.render_widget(Paragraph::new("Splits:").block(Block::default().borders(Borders::ALL)), layout[3]);
+        // std::thread::spawn(|| {
+        //     let _ = tui::main();
+        // }).join().expect("The inner TUI thread has panicked");
+        // tui::main();
+        // f.render_widget(Paragraph::new("Splits:").block(Block::default().borders(Borders::ALL)), layout[3]);
     }
     f.render_widget(Paragraph::new("fictional-waffle"), layout[0]);
     f.render_widget(self.fps_paragraph(), layout[1]);
@@ -172,9 +181,38 @@ Terminal: A terminal is a text-based interface for interacting with a computer's
 
 Shell: The shell is a program within the terminal that interprets and executes the commands you enter. It's the intermediary between you and the computer's operating system. It takes your text commands, translates them into actions that the computer can understand, and then carries out those actions. Different shells, like Bash or PowerShell, may have their own features and capabilities, but they all serve as the bridge between your instructions and the computer's actions.";
 
+    let text2 = "Bandit is a popular wargame provided by OverTheWire that's designed to help beginners learn the command line and basic security concepts. It consists of multiple levels, each with its own set of challenges. In this guide, we'll introduce you to Bandit, explain how to get started, and provide some general tips for beginners.
+
+How to Get Started with Bandit:
+Access the Bandit Server:
+
+Visit the Bandit page on OverTheWire: Bandit - OverTheWire.
+You'll find a link to an SSH command that looks like this: ssh bandit0@bandit.labs.overthewire.org -p 2220. This is how you access the game server.
+Use an SSH Client:
+
+You need an SSH client to connect to the server. For Windows, you can use a program like PuTTY. On macOS and Linux, you can use the built-in terminal.
+Copy the SSH command from the Bandit page, paste it into your terminal or SSH client, and press Enter.
+When prompted, enter the password for the current level (level 0's password is 'bandit0'). Note that you won't see the password as you type, so type it carefully.
+Start Playing:
+
+Once you're logged in, you'll be at the current level's home directory.
+Each level has a README file that explains your task and how to proceed. You can use the cat command to view the README: cat README.
+Follow the instructions in the README file to complete the level.
+Complete the Level:
+
+To complete a level, you need to find the password for the next level.
+Use your command line skills to navigate the file system, read files, and manipulate data to uncover the password.
+Moving to the Next Level:
+
+Once you find the password, use it to access the next level. You'll use the ssh command again with the new level's username and the password you found.
+Repeat and Learn:
+
+Continue playing and learning. Each level will teach you new concepts and tricks for using the command line.";
+
     let text = match self.page_index {
       0 => text0,
       1 => text1,
+      2 => text2,
       _ => text0,
     };
     let paragraph = Paragraph::new(text).block(Block::default().borders(Borders::ALL).style(Style::default().fg(Color::Green)).padding(Padding::new(1, 4, 1, 4)).title(Title::from("Learn The Command Line").alignment(Alignment::Center))).wrap({
@@ -197,19 +235,12 @@ Shell: The shell is a program within the terminal that interprets and executes t
     // let duration = self.format_duration(elapsed);
     // let lines = vec![duration.into()];
     // tui_big_text::BigTextBuilder::default().lines(lines).style(style).build().unwrap()
-    tui_big_text::BigTextBuilder::default().lines(vec!["GDSC IIITK".into()]).style(style).build().unwrap()
+    tui_big_text::BigTextBuilder::default().lines(vec!["GDSC ".into(), "IITK".into()]).style(style).build().unwrap()
   }
 
-  /// Renders the splits as a list of lines.
-  ///
-  /// ```text
-  /// #01 -- 00:00.693 -- 00:00.693
-  /// #02 -- 00:00.719 -- 00:01.413
-  /// ```
   fn help_paragraph(&mut self) -> Paragraph<'_> {
-    let space_action = "next page";
-    let help_text =
-      Line::from(vec!["space ".into(), space_action.dim(), " enter ".into(), "split".dim(), " q ".into(), "quit".dim()]);
+    let space_action = "split";
+    let help_text = Line::from(vec!["space ".into(), space_action.dim(), " l ".into(), "next page".dim(), " h ".into(), "previous page".dim(), " q ".into(), "quit".dim()]);
     Paragraph::new(help_text).gray()
   }
 
@@ -244,7 +275,7 @@ Shell: The shell is a program within the terminal that interprets and executes t
         Constraint::Min(0),     // fps counter
       ])
       .split(layout[0]);
-    
+   
     // center timer
     if AppState::Split == self.state {
         // break timer into 2 equal parts
@@ -264,20 +295,6 @@ Shell: The shell is a program within the terminal that interprets and executes t
     // top_layout[..].iter().chain(layout[1..].iter()).copied().collect()
   }
 
-  fn format_split<'a>(&self, index: usize, start: Instant, previous: Instant, current: Instant) -> Line<'a> {
-    let split = self.format_duration(current - previous);
-    let elapsed = self.format_duration(current - start);
-    Line::from(vec![
-      format!("#{:02} -- ", index + 1).into(),
-      Span::styled(split, Style::new().yellow()),
-      " -- ".into(),
-      Span::styled(elapsed, Style::new()),
-    ])
-  }
-
-  fn format_duration(&self, duration: Duration) -> String {
-    format!("{:02}:{:02}.{:03}", duration.as_secs() / 60, duration.as_secs() % 60, duration.subsec_millis())
-  }
 }
 //// ANCHOR_END: app
 

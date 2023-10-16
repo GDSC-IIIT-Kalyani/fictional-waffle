@@ -33,7 +33,7 @@ struct Size {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+pub async fn main() -> io::Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, ResetColor)?;
     enable_raw_mode()?;
@@ -200,20 +200,34 @@ fn ui<B: Backend>(f: &mut Frame<B>, screen: &Screen) {
         .margin(1)
         .constraints(
             [
-                ratatui::layout::Constraint::Percentage(100),
-                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(11),
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(1),
             ]
             .as_ref(),
         )
         .split(f.size());
+
+    let terminal_chunk = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .margin(1)
+        .constraints(
+            [
+                ratatui::layout::Constraint::Percentage(50),
+                ratatui::layout::Constraint::Percentage(50),
+            ]
+            .as_ref(),
+        )
+        .split(chunks[0]);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .style(Style::default().add_modifier(Modifier::BOLD));
     let pseudo_term = PseudoTerminal::new(screen).block(block);
-    f.render_widget(pseudo_term, chunks[0]);
+    f.render_widget(pseudo_term, terminal_chunk[0]);
     let explanation = "Press q to exit".to_string();
     let explanation = Paragraph::new(explanation)
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
         .alignment(Alignment::Center);
-    f.render_widget(explanation, chunks[1]);
+    f.render_widget(explanation, chunks[2]);
 }
